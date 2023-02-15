@@ -1,0 +1,202 @@
+---
+title: "R Notebook for the Course BCB420 at the University of Toronto - Assignment 1"
+output:
+  html_notebook:
+    toc: true
+  bibliography: references.bib
+---
+# This Assignment
+This assignment is to demonstrate data analysis in R. An expression data set was selected and using R, has been cleaned up and mapped to HUGO symbols, and then normalized. The data set that was selected, entitled [Small Molecule Targets TMED9 and Promotes Lysosomal Degradation to Reverse Proteinopathy](https://doi.org/10.1016/j.cell.2019.07.002)[@dvela2019small], shows that the toxic accumulation in TMED9-enriched vesicles of mutant MUC1-fs is cleared from mice and patient kidneys by BRD4780 binding to TMED9, releasing MUC1-fs. This data set was of interest because it contained both human and mouse data, and this data was able to be processed unlike previous attempts at other data sets.
+
+
+### Loading the necessary libraries
+
+```{r message = FALSE, warning = FALSE}
+library(kableExtra)
+library(biomaRt)
+library(GEOmetadb)
+library(edgeR)
+```
+
+# Finding all the filters and attributes for mapping the HUGO symbols 
+
+For this assignment, the methods used to find filters and attributes have been removed, commented out or left out of the HTML document for ease of compiling and reading, but some have been kept in the notebook to demonstrate how it was done.
+
+```{r warning = FALSE}
+ensembl <- useMart("ensembl")
+datasets <- listDatasets(ensembl)
+kable(head(datasets),format = "html")
+```
+
+The other commands in finding the attributes have been omitted.
+
+```{r message = FALSE, warning = FALSE}
+sfiles2 = getGEOSuppFiles('GSE129943')
+fnames = rownames(sfiles2)
+# there is only one supplemental file
+ca125_exp = read.delim(fnames[1],header=TRUE,
+                check.names = FALSE)
+#translate out counts into counts per million using the edgeR package
+#cpms = cpm(ca125_exp[,3:22])
+ cpms = cpm(ca125_exp[,3:8])
+rownames(cpms) <- ca125_exp[,1]
+# get rid of low counts
+keep = rowSums(cpms >1) >= 3
+ca125_exp_filtered = ca125_exp[keep,]
+```
+
+```{r}
+conversion_stash <- "ca125_id_conversion.rds"
+if(file.exists(conversion_stash)){
+  ca125_id_conversion <- readRDS(conversion_stash)
+} else {
+  ca125_id_conversion <- getBM(attributes = c("ensembl_gene_id","hgnc_symbol"),
+                            filters = c("ensembl_gene_id"),
+                            values = ca125_exp_filtered$ensembl75_id,
+                            mart = ensembl)
+  saveRDS(ca125_id_conversion, conversion_stash)
+}
+```
+(Source: Lecture 5, pg. 33)
+
+```{r}
+colnames(ca125_exp)
+
+#get the 2 and third token from the column names
+samples <- data.frame(lapply(colnames(ca125_exp)[3:8], 
+        FUN=function(x){unlist(strsplit(x, split = "\\."))[c(2,3)]}))
+colnames(samples) <- colnames(ca125_exp)[3:8]
+rownames(samples) <- c("patients","mouse")
+samples <- data.frame(t(samples))
+
+filtered_data_matrix <- as.matrix(ca125_exp_filtered[,3:8])
+rownames(filtered_data_matrix) <- ca125_exp_filtered$ensembl75_id
+d = DGEList(counts=filtered_data_matrix, group=samples$cell_type)
+
+d = calcNormFactors(d)
+d$samples[1:6,]
+
+#get the normalized data
+normalized_counts <- cpm(d)
+```
+(Source: Lecture 5, pg. 6)
+
+```{r}
+# plotMDS(d, labels=rownames(samples), col = c("darkgreen","blue")[factor(samples$cell_type)])
+```
+
+```{r}
+length(which(rownames(normalized_counts) %in% 
+                ca125_id_conversion$ensembl_gene_id))
+nrow(normalized_counts)
+nrow(normalized_counts) - length(which(rownames(normalized_counts) %in%
+                ca125_id_conversion$ensembl_gene_id))
+```
+It would seem as if after all that, no expressions could be mapped to current HUGO symbols.
+
+# Application of Normalization
+
+```{r}
+normalized_counts_annot <- merge(ca125_id_conversion, normalized_counts,
+                                 by.x = 1, by.y = 0, all.y=TRUE)
+kable(normalized_counts_annot[1:5,1:8],type = "html")
+```
+```{r}
+ensembl_id_missing_gene <- normalized_counts_annot$ensembl_gene_id[
+  which(is.na(normalized_counts_annot$hgnc_symbol))]
+length(ensembl_id_missing_gene)
+```
+
+```{r}
+old_mapping <- merge(ca125_exp[,1:2],data.frame(ensembl_id_missing_gene))
+```
+
+```{r}
+kable(old_mapping[1:10,], type="html")
+```
+
+## Normalization of Data
+Unfortunately, what was once working is now crashing my computer, and as a result the graphs below are absent in the HTML.
+```{r}
+summarized_gene_counts <- sort(table(ca125_exp$gname),
+                               decreasing = TRUE)
+kable(table(ca125_exp$gname)[1:3], format="html")
+```
+
+```{r}
+kable(summarized_gene_counts[which(summarized_gene_counts>1)[1:10]], format="html")
+```
+
+```{r}
+summarized_gene_counts_filtered <- sort(table(ca125_exp_filtered$gname),
+                                        decreasing = TRUE)
+kable(summarized_gene_counts_filtered[
+  which(summarized_gene_counts_filtered>1)[1:7]], 
+  format="html")
+                                        
+```
+
+```{r}
+r <- rnorm(1000, mean=0, sd=1)
+hist(r,freq = FALSE,breaks = 30,
+     xlim = c(-4, 4),ylim = c(0, 1),
+     main = "Normal Distribution",
+     xlab = "x",ylab = "f(x)", col = "yellow")
+
+x <- seq(-4, 4, length.out = 100)
+#add the density distribution
+points(x, dnorm(x), type = "l", lwd = 2, col="firebrick")
+
+data2plot <- log2(cpm(ca125_exp_filtered[,3:8]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "CA125 RNASeq Samples")
+#draw the median on each box plot
+abline(h = median(apply(data2plot, 2, median)), 
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+```{r}
+counts_density <- apply(log2(cpm(ca125_exp_filtered[,3:8])), 
+                        2, density)
+  #calculate the limits across all the samples
+    xlim <- 0; ylim <- 0
+    for (i in 1:length(counts_density)) {
+      xlim <- range(c(xlim, counts_density[[i]]$x)); 
+      ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(counts_density))
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="", cex.lab = 0.85)
+    #plot each line
+    for (i in 1:length(counts_density)) 
+      lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),  
+           col=cols, lty=ltys, cex=0.75, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90")
+```
+
+```{r}
+plotMA(log2(ca125_exp[,c(3,4)]), ylab="M - ratio log expression", 
+       main="CA125 + vs - - example")
+```
+
+```{r}
+filtered_data_matrix <- as.matrix(ca125_exp_filtered[,3:8])
+rownames(filtered_data_matrix) <- ca125_exp_filtered$ensembl75_id
+d = DGEList(counts=filtered_data_matrix, group=samples$cell_type)
+d = calcNormFactors(d)
+
+normalized_counts <- cpm(d)
+
+plotMDS(d, labels=rownames(samples),
+  col = c("darkgreen","blue")[factor(samples$cell_type)])
+```
+
+
+Points of note: no outliers were removed and no replicates with full coverage.
