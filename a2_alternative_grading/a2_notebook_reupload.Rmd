@@ -1,0 +1,727 @@
+---
+title: "R Notebook for the Course BCB420 at the University of Toronto - Assignment 2"
+author: "Babak Eric Jadidzadeh"
+output:
+  html_notebook:
+    toc: yes
+bibliography: a2.bib
+---
+
+# Introduction
+
+This assignment is a continuation of A1, where an expression data set was selected and with R cleaned up and mapped to HUGO symbols, and then normalized. The data set that was selected, entitled [Small Molecule Targets TMED9 and Promotes Lysosomal Degradation to Reverse Proteinopathy](https://doi.org/10.1016/j.cell.2019.07.002)[@dvela2019small], shows that the toxic accumulation in TMED9-enriched vesicles of mutant MUC1-fs is cleared from mice and patient kidneys by BRD4780 binding to TMED9, releasing MUC1-fs. In this assignment A2, we do Differential Gene Expression analysis with the normalized expression set from A1, which is ranking the genes according to differential expression. Then once the list is ranked, thresholded over-representation analysis is done to highlight dominant genes in the top set of genes.
+
+# A1 Results
+
+Unexplained figures might be included in this section. The code has been retained as it has been fixed from A1's submission.
+
+## Loading the necessary libraries
+
+```{r message=FALSE, warning=FALSE}
+library(kableExtra)
+library(biomaRt)
+library(GEOmetadb)
+library(edgeR)
+
+ensembl <- useMart("ensembl")
+datasets <- listDatasets(ensembl)
+
+working_files = getGEOSuppFiles('GSE129943')
+
+fnames = rownames(working_files)
+
+```
+
+## Finding all the filters and attributes for mapping the HUGO symbols
+
+```{r}
+# there is only one supplemental file
+expr = read.delim(fnames[1],header=TRUE, check.names = FALSE)
+# expr
+```
+
+```{r}
+# translate out counts into counts per million using the edgeR package
+cpms = cpm(expr[,3:8])
+# cpms
+```
+
+```{r}
+rownames(cpms) <- expr[,1]
+# cpms
+```
+
+
+```{r}
+# get rid of low counts
+keep = rowSums(cpms >1) >= 3
+expr_filtered = expr[keep,]
+expr_filtered
+```
+
+```{r}
+ensembl = useDataset("hsapiens_gene_ensembl", mart = ensembl)
+biomart_human_filters <- listFilters(ensembl)
+colnames(expr)
+```
+
+```{r}
+conversion_stash <- "conversion.rds"
+if(file.exists(conversion_stash)){
+  conversion <- readRDS(conversion_stash)
+} else {
+  conversion <- getBM(attributes = c("ensembl_gene_id","hgnc_symbol"), filters = c("ensembl_gene_id"),
+                      values = expr_filtered$Ensembl, mart = ensembl)
+  saveRDS(conversion, conversion_stash)
+}
+```
+
+```{r}
+#get the 2 and third token from the column names
+samples <- data.frame(lapply(colnames(expr)[3:8], FUN=function(x){unlist(strsplit(x, split = "_"))[c(0,1)]}))
+colnames(samples) <- colnames(expr)[3:8]
+rownames(samples) <- c("mammal_type")
+samples <- data.frame(t(samples))
+
+filtered_data_matrix <- as.matrix(expr_filtered[,3:8])
+rownames(filtered_data_matrix) <- expr_filtered$Ensembl
+d = DGEList(counts=filtered_data_matrix, group=samples$mammal_type)
+
+d = calcNormFactors(d)
+d$samples[1:6,]
+```
+
+```{r}
+normalized_counts <- cpm(d)
+plotMDS(d, labels=rownames(samples),
+  col = c("darkgreen","blue")[factor(samples$mammal_type)])
+```
+
+```{r}
+length(which(rownames(normalized_counts) %in% conversion$ensembl_gene_id))
+nrow(normalized_counts)
+nrow(normalized_counts) - length(which(rownames(normalized_counts) %in%
+                conversion$ensembl_gene_id))
+```
+
+353 expressions could not be mapped to HUGO symbols.
+
+## Application of normalization
+
+```{r}
+normalized_counts_annot <- merge(conversion, normalized_counts, by.x = 1, by.y = 0, all.y=TRUE)
+# kable(normalized_counts_annot[1:5,1:8],type = "html")
+ensembl_id_missing_gene <- normalized_counts_annot$ensembl_gene_id[which(is.na(normalized_counts_annot$hgnc_symbol))]
+length(ensembl_id_missing_gene)
+# kable(ensembl_id_missing_gene)
+```
+
+```{r}
+old_mapping <- merge(expr[,1:2],data.frame(ensembl_id_missing_gene))
+kable(old_mapping[1:10,], type="html")
+```
+
+## Normalization of data
+
+```{r}
+summarized_gene_counts <- sort(table(expr$HGNC), decreasing = TRUE)
+kable(summarized_gene_counts[which(summarized_gene_counts>1)[4:10]], format="html")
+```
+
+```{r}
+summarized_gene_counts_filtered <- sort(table(expr$HGNC), decreasing = TRUE)
+kable(summarized_gene_counts_filtered[which(summarized_gene_counts_filtered>1)[4:10]], format="html")
+```
+
+```{r}
+r <- rnorm(1000, mean=0, sd=1)
+hist(r,freq = FALSE,breaks = 30,
+     xlim = c(-4, 4),ylim = c(0, 1),
+     main = "Normal Distribution",
+     xlab = "x",ylab = "f(x)", col = "yellow")
+
+x <- seq(-4, 4, length.out = 100)
+#add the density distribution
+points(x, dnorm(x), type = "l", lwd = 2, col="firebrick")
+```
+
+```{r warning=FALSE}
+data2plot <- log2(cpm(expr_filtered[,3:8]))
+boxplot(data2plot, xlab = "Samples", ylab = "log2 CPM", 
+        las = 2, cex = 0.5, cex.lab = 0.5,
+        cex.axis = 0.5, main = "Nucleotide Samples")
+abline(h = median(apply(data2plot, 2, median)), 
+       col = "green", lwd = 0.6, lty = "dashed")
+```
+
+```{r}
+counts_density <- apply(log2(cpm(expr_filtered[,3:8])), 
+                        2, density)
+  #calculate the limits across all the samples
+    xlim <- 0; ylim <- 0
+    for (i in 1:length(counts_density)) {
+      xlim <- range(c(xlim, counts_density[[i]]$x)); 
+      ylim <- range(c(ylim, counts_density[[i]]$y))
+    }
+    cols <- rainbow(length(counts_density))
+    ltys <- rep(1, length(counts_density))
+    #plot the first density plot to initialize the plot
+    plot(counts_density[[1]], xlim=xlim, ylim=ylim, type="n", 
+         ylab="Smoothing density of log2-CPM", 
+         main="", cex.lab = 0.85)
+    #plot each line
+    for (i in 1:length(counts_density)) 
+      lines(counts_density[[i]], col=cols[i], lty=ltys[i])
+    #create legend
+    legend("topright", colnames(data2plot),  
+           col=cols, lty=ltys, cex=0.75, 
+           border ="blue",  text.col = "green4", 
+           merge = TRUE, bg = "gray90")
+```
+
+```{r}
+colnames(expr)
+expr[,c(3,6)]
+plotMA(log2(expr[,c(3,6)]), ylab="M - ratio log expression", 
+       main="Human vs Mouse")
+```
+
+```{r}
+filtered_data_matrix <- as.matrix(expr_filtered[,3:8])
+rownames(filtered_data_matrix) <- expr_filtered$Ensembl
+# filtered_data_matrix
+d = DGEList(counts=filtered_data_matrix, group=samples$mammal_type)
+d = calcNormFactors(d)
+
+normalized_counts <- cpm(d)
+
+plotMDS(d, labels=rownames(samples),
+  col = c("darkgreen","blue")[factor(samples$mammal_type)])
+```
+
+# The End of A1 and Beginning of A2
+
+```{r}
+normalized_count_data_stash <- "finalized_normalized_counts.txt"
+if(file.exists(normalized_count_data_stash)){
+  normalized_count_data <- read.table(file=file.path(getwd(), normalized_count_data_stash),
+                                      header = TRUE,sep = "\t", stringsAsFactors = FALSE, check.names=FALSE)
+} else {
+  write.table(normalized_counts, normalized_count_data_stash, append = FALSE, sep = "\t", dec = ".",
+              row.names = TRUE, col.names = TRUE)
+}
+
+cbind(HGNC = 0, normalized_count_data)
+normalized_count_data$HGNC <- expr_filtered$HGNC
+normalized_count_data <- normalized_count_data[colnames(normalized_count_data)[c(7, 1:6)]]
+normalized_count_data
+```
+
+```{r}
+kable(normalized_count_data[1:7,1:7], type="html")
+```
+
+**Figure 1. Normalized gene count dataset (first 7 rows shown).**
+
+The dataset contains the gene counts for 6 samples, 3 human and 3 mouse, for a total of 14,241 genes. HGNC symbols were added back to the dataset, and it is ordered by Ensembl number. N1H1 refers to human samples and P1A8 refers to mouse samples.
+
+## The first heatmap
+
+A heatmap allows us to graph data from many samples and measurements in a way where can highlight themes in the data.
+
+```{r}
+heatmap_matrix <- normalized_count_data[,2:ncol(normalized_count_data)]
+rownames(heatmap_matrix) <- rownames(normalized_count_data)
+colnames(heatmap_matrix) <- colnames(normalized_count_data[,2:ncol(normalized_count_data)])
+```
+
+```{r message=FALSE}
+library(ComplexHeatmap)
+library(circlize)
+```
+
+```{r}
+# The minimum of heatmap_matrix is 0 so the white/red configuration is used.
+
+heatmap_col = colorRamp2(c( 0, 1000 ), c( "white", "red"))
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix),
+      show_row_dend = TRUE,show_column_dend = TRUE, 
+      col=heatmap_col,show_column_names = TRUE, 
+      show_row_names = FALSE,show_heatmap_legend = TRUE)
+current_heatmap
+```
+
+**Figure 2. Heatmap of normalized gene count dataset.**
+
+With a customizable heatmap, a white/red configuration is used because the minimum of our dataset is 0. Genes of humans and mice are divided as one would expect into two branches. Colour shows that there is gene similarity that is shared between human and mouse pools, but also there are genes that are retained in either one side or the other. Again, N1H1 refers to human samples and P1A8 refers to mouse samples.
+
+## The second heatmap with row-normalization
+
+We create another heatmap, but this time with row-normalization. It happens as follows: 
+
+* Scale each row and centre them around the mean.
+* From each value we subtract the mean and divide by the standard deviation of the row to row-normalize it.
+
+(Source: Lecture 6, Slide 9)
+
+```{r}
+# With row-normalization (slide 9, lecture 6)
+
+heatmap_matrix <- t(scale(t(heatmap_matrix)))
+
+if(min(heatmap_matrix) == 0){
+    heatmap_col = colorRamp2(c( 0, max(heatmap_matrix)), 
+                      c( "white", "red"))
+  } else {
+    heatmap_col = colorRamp2(c(min(heatmap_matrix), 0,
+        max(heatmap_matrix)), c("blue", "white", "red"))
+  }
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix),
+      show_row_dend = TRUE,show_column_dend = TRUE, 
+      col=heatmap_col,show_column_names = TRUE, 
+      show_row_names = FALSE,show_heatmap_legend = TRUE)
+```
+
+```{r}
+current_heatmap
+```
+**Figure 3. Heatmap of normalized gene count dataset with row-normalization.**
+
+The difference between human and mouse pools is now easily discernible on the heatmap. Human genes that are blue are red in their mouse counterparts and vice-versa. 
+
+## Expression of a single gene
+
+Low-scale experiments traditionally compare the expression of a single or a handful of genes. The paper describes that the MKD disease is caused by a mutation in the MUC1 gene, so we analyze it separately.
+
+```{r}
+gene_of_interest <- which(normalized_count_data$HGNC == "MUC1")
+
+mouse_samples <- grep(colnames(normalized_count_data), pattern="P1A8")
+human_samples <- grep(colnames(normalized_count_data), pattern="N1H1")
+
+muc1_mouse_samples <- t(normalized_count_data[gene_of_interest, mouse_samples])
+colnames(muc1_mouse_samples) <- c("mouse MUC1")
+#muc1_mouse_samples
+
+muc1_human_samples <- t(normalized_count_data[gene_of_interest, human_samples])
+colnames(muc1_human_samples) <- c("human MUC1")
+#muc1_human_samples
+```
+
+```{r}
+t.test(x=t(muc1_mouse_samples),y=t(muc1_human_samples))
+```
+
+**Figure 4. Welch Two Sample t-test.**
+
+A t.test compares the individual MUC1 gene. The null hypothesis of the two sample t-test is that there is no difference in means of each sample, and it assumes that both sample A and sample B are normally distributed (Source: Lecture 6, Slide 13). Alternative hypothesis: true difference in means is not equal to 0. The two samples are normalized human and mouse groups.
+
+## Differential gene expression
+
+A model is defined to be used to calculate differential expression. Then from the two options given for doing data analysis, Limma and edgeR, we choose Limma (LInear Models of MircroArray, @limma) as it is better suited for our microarray data rather than for bulk RNAseq analysis.
+
+```{r}
+pat_colors <- rainbow(10)
+pat_colors <- unlist(lapply(pat_colors,FUN=function(x){rep(x,2)}))
+limma::plotMDS(heatmap_matrix, col = pat_colors )
+```
+**Figure 5. MDS plot of normalized gene count dataset.**
+
+Human pools show greater leading logFC dim 2 variability than mouse pools. They form distinct groups on the leading logFC dim 1 scale. *Colours are for visual effect only.*
+
+## Model design
+
+I took the model design directly from A1, which is splitting the data into groups by mammal type: N1H1 human and P1A8 mouse.
+
+```{r}
+#get the 2 and third token from the column names
+samples <- data.frame(lapply(colnames(normalized_count_data)[2:7], 
+                      FUN=function(x){unlist(strsplit(x, split = "_"))[c(0,1)]}))
+colnames(samples) <- colnames(normalized_count_data)[2:7]
+rownames(samples) <- c("mammal_type")
+samples <- data.frame(t(samples))
+
+samples
+
+#here we have the model design being samples split into mammal types
+model_design <- model.matrix(~ samples$mammal_type )
+
+#we create our data matrix similar to that like in A1
+expressionMatrix <- as.matrix(normalized_count_data[,2:7])
+rownames(expressionMatrix) <- normalized_count_data$Ensembl
+colnames(expressionMatrix) <- colnames(normalized_count_data)[2:7]
+minimalSet <- ExpressionSet(assayData=expressionMatrix)
+
+normalized_count_data[,2:7]
+
+#data fit to the model
+fit <- lmFit(minimalSet, model_design)
+#fit
+
+#empirical Bayes to compute differential expression
+fit2 <- eBayes(fit,trend=TRUE)
+#fit2
+topfit <- topTable(fit2, coef=ncol(model_design), adjust.method = "BH", number = nrow(expressionMatrix))
+topfit
+
+normalized_count_data
+#everything looks good!
+```
+
+```{r}
+#merge hgnc names to topfit table
+#topfit
+output_hits <- topfit
+cbind(HGNC = 0, output_hits)
+output_hits$HGNC <- normalized_count_data$HGNC
+rownames(output_hits) <- rownames(normalized_count_data)
+
+#sort by pvalue
+output_hits <- output_hits[sort.list(output_hits$P.Value), c("HGNC", colnames(output_hits)[1:6])]
+kable(output_hits[1:10,1:7],type="html",row.names = FALSE, digits=15)
+```
+
+**Figure 6. Differential expression table from normalized count data (first 10 rows shown).**
+
+The model's computed t-statistics, moderated F-statistics, and log-odds of differential expression by empirical Bayes moderation of the standard errors towards a common value. It is now sorted by p-value. @limma.
+
+```{r}
+#genes that pass the threshold p-value < 0.05
+length(which(output_hits$P.Value < 0.05))
+
+#genes that pass correction
+length(which(output_hits$adj.P.Val < 0.05))
+```
+
+## Correction
+
+This refers to multipole hypothesis testing and is done because as the number of tests performed increases the likelihood that positive results will occur simply by chance increases (Source: Lecture 6, Slide 26). We use the Benjamini-Yekutieli method for correction.
+
+```{r}
+model_design_m <- model.matrix(
+  ~ samples$mammal_type)
+kable(model_design_m[1:5,1:2],type="html")
+fit_m <- lmFit(minimalSet, model_design_m)
+fit2_m <- eBayes(fit_m,trend=TRUE)
+topfit_m <- topTable(fit2_m, 
+                   coef=ncol(model_design_m),
+                   adjust.method = "BY",
+                   number = nrow(expressionMatrix))
+#merge hgnc names to topfit table
+output_hits_m <- topfit_m
+cbind(HGNC = 0, output_hits_m)
+output_hits_m$HGNC <- normalized_count_data$HGNC
+rownames(output_hits_m) <- rownames(normalized_count_data)
+
+#sort by pvalue
+output_hits_m <- output_hits_m[sort.list(output_hits_m$P.Value), c("HGNC", colnames(output_hits_m)[1:6])]
+kable(output_hits_m[1:10,1:7],type="html",row.names = FALSE, digits=15)
+```
+
+**Figure 7. Corrected differential expression table from normalized count data (first 10 rows shown).**
+
+Like figure 6 but with the corrected values. The column that differs is the adjusted p-values, adj.P.val.
+
+```{r}
+#genes that pass the threshold p-value < 0.05
+length(which(output_hits_m$P.Value < 0.05))
+
+#genes that pass correction
+length(which(output_hits_m$adj.P.Val < 0.05))
+```
+
+```{r}
+simple_model_pvalues <- data.frame(hgnc = output_hits$HGNC, simple_pvalue = output_hits$P.Value)
+m_model_pvalues <-  data.frame(hgnc = output_hits_m$HGNC, m_pvalue = output_hits_m$P.Value)
+two_models_pvalues <- merge(simple_model_pvalues, m_model_pvalues, by.x=1, by.y=1)
+two_models_pvalues$colour <- "gray90"
+two_models_pvalues$colour[two_models_pvalues$simple_pvalue<0.05] <- "orange"
+two_models_pvalues$colour[two_models_pvalues$m_pvalue<0.05] <- "blue"
+two_models_pvalues$colour[two_models_pvalues$simple_pvalue<0.05 & two_models_pvalues$m_pvalue<0.05] <- "red"
+plot(two_models_pvalues$simple_pvalue,
+     two_models_pvalues$m_pvalue,
+     col = two_models_pvalues$colour,
+     xlab = "simple model p-values",
+     ylab ="corrected model p-values", 
+     main="Simple vs BY Corrected Limma")
+
+legend("topleft", 
+       legend=c("simple p-value < 0.05", "corrected p-value < 0.05", "simple and corrected p-value < 0.05", "not < 0.05"),
+       col=c("orange", "blue", "red", "gray90"), lty=ltys, cex=0.75, 
+       border ="blue",  text.col = "green4", 
+       merge = TRUE, bg = "white")
+```
+
+**Figure 8. Simple vs BY corrected Limma.**
+
+Two models, the simple model and the Benjamini-Yekutieli corrected model, are plotted where when both simple and corrected p-values are less than 0.05, it is coloured in red.
+
+```{r}
+hgnc_of_interest <- normalized_count_data$HGNC[which(normalized_count_data$HGNC == "MUC1")]
+two_models_pvalues$colour <- "grey"
+two_models_pvalues$colour[two_models_pvalues$HGNC == hgnc_of_interest] <- "red"
+plot(two_models_pvalues$simple_pvalue,
+     two_models_pvalues$m_pvalue,
+     col = two_models_pvalues$colour,
+     xlab = "simple model p-values",
+     ylab ="corrected model p-values",
+     main="Simple vs BY Corrected Limma")
+points(two_models_pvalues[which(
+     two_models_pvalues$hgnc == hgnc_of_interest),2:3], 
+     pch=20, col="red", cex=1.5)
+legend(0,1,legend=c("MUC1","rest"),
+       fill=c("red","grey"),cex = 0.7)
+```
+
+**Figure 9. Simple vs BY corrected Limma with MUC1 separately distinguished.**
+
+Like figure 8 but with our gene of interest, MUC1, highlighted with red.
+
+```{r}
+top_hits = rownames(output_hits_m[which(output_hits_m$P.Value<0.05),])
+heatmap_matrix_tophits <- t(
+  scale(t(heatmap_matrix[
+    which(rownames(heatmap_matrix) %in% top_hits),])))
+
+if(min(heatmap_matrix_tophits) == 0){
+    heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)), 
+                             c( "white", "red"))
+  } else {
+    heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits), 0,
+      max(heatmap_matrix_tophits)), c("blue", "white", "red"))
+  }
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+                           cluster_rows = TRUE,
+                           cluster_columns = TRUE,
+                           show_row_dend = TRUE,
+                           show_column_dend = TRUE, 
+                           col=heatmap_col,
+                           show_column_names = TRUE, 
+                           show_row_names = FALSE,
+                           show_heatmap_legend = TRUE,
+                           )
+current_heatmap
+```
+
+**Figure 10. Heatmap of top hits using Limma.**
+
+The heatmap using Limma is different from our simple normalized gene count dataset with row-normalization.
+
+```{r}
+top_hits = rownames(output_hits_m[which(output_hits_m$P.Value<0.01),])
+heatmap_matrix_tophits <- t(
+  scale(t(heatmap_matrix[
+    which(rownames(heatmap_matrix) %in% top_hits),])))
+
+if(min(heatmap_matrix_tophits) == 0){
+    heatmap_col = colorRamp2(c( 0, max(heatmap_matrix_tophits)), 
+                             c( "white", "red"))
+  } else {
+    heatmap_col = colorRamp2(c(min(heatmap_matrix_tophits), 0,
+      max(heatmap_matrix_tophits)), c("blue", "white", "red"))
+  }
+current_heatmap <- Heatmap(as.matrix(heatmap_matrix_tophits),
+                           cluster_rows = TRUE,
+                           cluster_columns = FALSE,
+                           show_row_dend = TRUE,
+                           show_column_dend = FALSE, 
+                           col=heatmap_col,
+                           show_column_names = TRUE, 
+                           show_row_names = FALSE,
+                           show_heatmap_legend = TRUE,
+                           )
+current_heatmap
+```
+
+**Figure 11. Heatmap of top hits using Limma and p-value < 0.01.**
+
+Like figure 10 but showing only p-values that are less than 0.01 as opposed to 0.05 and column clustering is disabled ordering them by group.
+
+## Thresholded over-representation analysis
+
+```{r}
+d = DGEList(counts=filtered_data_matrix, group=samples$mammal_type)
+#estimate dispersion
+d <- estimateDisp(d, model_design)
+#calculate normalization factors
+d <- calcNormFactors(d)
+#fit model
+fit <- glmQLFit(d, model_design)
+```
+
+```{r}
+#fit
+#calculate differential expression
+qlf.pos_vs_neg <- glmQLFTest(fit, coef='samples$mammal_typeP1A8')
+kable(topTags(qlf.pos_vs_neg), type="html",row.names = FALSE, digits=18)
+```
+
+**Figure 12. Table of differential expression calculated with edgeR (first 10 rows shown).**
+
+A different way of calculating differential expression was done with the edgeR (@edger) package.
+
+```{r}
+#get all the results
+qlf_output_hits <- topTags(qlf.pos_vs_neg,sort.by = "PValue",
+                           n = nrow(filtered_data_matrix))
+#differential expression calculation that yields sightly different results for what pass the threshold p-value and correction
+length(which(qlf_output_hits$table$PValue < 0.05))
+length(which(qlf_output_hits$table$FDR < 0.05))
+```
+
+```{r}
+#number of upregulated genes
+length(which(qlf_output_hits$table$PValue < 0.05 
+             & qlf_output_hits$table$logFC > 0))
+#number of downregulated genes
+length(which(qlf_output_hits$table$PValue < 0.05 
+             & qlf_output_hits$table$logFC < 0))
+```
+
+Thresholded, upregulated and downregulated lists of genes are written to disk.
+
+```{r}
+#create a thresholded list of genes
+
+#merge gene names with the top hits
+#normalized_counts_annot <- merge(conversion, normalized_counts, by.x = 1, by.y = 0, all.y=TRUE)
+qlf_output_hits_withgn <- merge(expr[,1:2],qlf_output_hits, by.x = 1, by.y = 0)
+                                
+qlf_output_hits_withgn[,"rank"] <- -log(qlf_output_hits_withgn$PValue)
+
+#output_hits <- output_hits[sort.list(output_hits$P.Value), c("HGNC", colnames(output_hits)[1:6])]
+qlf_output_hits_withgn <- qlf_output_hits_withgn[sort.list(qlf_output_hits_withgn$PValue),]
+
+upregulated_genes <- qlf_output_hits_withgn$HGNC[
+  which(qlf_output_hits_withgn$PValue < 0.05 
+             & qlf_output_hits_withgn$logFC > 0)]
+
+downregulated_genes <- qlf_output_hits_withgn$HGNC[
+  which(qlf_output_hits_withgn$PValue < 0.05 
+             & qlf_output_hits_withgn$logFC < 0)]
+
+write.table(x=upregulated_genes,
+            file=file.path(getwd(),"upregulated_genes.txt"), append = FALSE, sep = "\t", dec = ".",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+write.table(x=downregulated_genes,
+            file=file.path(getwd(),"downregulated_genes.txt"), append = FALSE, sep = "\t", dec = ".",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+qlf_output_hits_withgn
+
+write.table(x=qlf_output_hits_withgn$HGNC,
+            file=file.path(getwd(),"unranked_genelist.txt"), append = FALSE, sep = "\t", dec = ".",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+
+write.table(x=data.frame(genename= qlf_output_hits_withgn$HGNC, F_stat= qlf_output_hits_withgn$rank),
+            file=file.path(getwd(),"ranked_genelist.txt"), append = FALSE, sep = "\t", dec = ".",
+            row.names = FALSE,col.names = FALSE,quote = FALSE)
+```
+
+## Continuation of analysis with g:Profiler
+
+We will now use g:Profiler (@gprofiler) to analyze our thresholded lists of genes, both upregulated and downregulated. The Benjamini-Yekutieli correction method is not available in g:Profiler, we use the bonferroni correction method that reduces the number of genes to approximately 1499.
+
+```{r}
+up_gostres <- gprofiler2::gost(query = upregulated_genes, 
+                                 organism = "hsapiens", 
+                                 exclude_iea = TRUE,
+                                 correction_method = "bonferroni",
+                                 sources = c("GO:BP", "REAC", "WP")
+                                )
+kable(up_gostres$result[1:5,3:11],type="html",row.names = FALSE, digits=22)
+nrow(up_gostres$result)
+```
+
+**Figure 13. Upregulated genes (first 5 rows shown).**
+
+Analysis with g:Profiler with the R package (@gprofiler) yields 311 genesets. The online web application was also used.
+
+```{r}
+down_gostres <- gprofiler2::gost(query = downregulated_genes, 
+                                 organism = "hsapiens", 
+                                 exclude_iea = TRUE,
+                                 correction_method = "bonferroni",
+                                 sources = c("GO:BP", "REAC", "WP")
+                                )
+kable(down_gostres$result[1:5,3:11],type="html",row.names = FALSE, digits=22)
+nrow(down_gostres$result)
+```
+
+**Figure 14. Downregulated genes (first 5 rows shown).**
+
+Analysis with g:Profiler with the R package (@gprofiler) yields 189 genesets. The online web application was also used.
+
+## Answers to the questions about differential expression
+
+1. Calculate p-values for each of the genes in your expression set. How many genes were significantly differentially expressed? What thresholds did you use and why?
+
+    9322 genes were significantly expressed with a p-value < 0.05. I kept it at the conventionally used p-value of 0.05 because changing it to 0.01 didn't reduce the number of genes by that much.  
+
+2. Multiple hypothesis testing - correct your p-values using a multiple hypothesis correction method. Which method did you use? And Why? How many genes passed correction?
+
+    I used the Benjamini-Yekutieli method for correction because of the methods that can be selected, some didn't change the number of genes that passed correction, and others reduced it to 1000-2000 genes that passed correction, which I thought was too much of a change. With the BY method, 5704 genes passed correction.
+
+3. Show the amount of differentially expressed genes using an MA Plot or a Volcano plot. Highlight genes of interest.
+
+```{r warning=FALSE}
+pm_human <- sample(c(rownames(output_hits_m) %in% (
+    normalized_count_data$N1H1_Pool_1 ||
+    normalized_count_data$N1H1_Pool_2 ||
+    normalized_count_data$N1H1_Pool_3 )
+))
+    
+pm_mouse <- sample(c(rownames(output_hits_m) %in% (
+    normalized_count_data$P1A8_Pool_1 ||
+    normalized_count_data$P1A8_Pool_2 ||
+    normalized_count_data$P1A8_Pool_3 )
+))
+
+pm <- data.frame(pm_human, pm_mouse)
+colnames(pm)
+
+c_h <- output_hits_m[which(pm$pm_human)]
+c_m <- output_hits_m[which(pm$pm_mouse)]
+
+pl <- data.frame(c_h, c_m)
+
+#]$P.Value<0.05
+colnames(pl)
+
+#plotMA(log2(pl[,c(0,1)]), ylab="M - ratio log expression", main="Human vs Mouse")
+```
+
+4. Visualize your top hits using a heatmap. Do you conditions cluster together? Explain why or why not.
+
+    Figures 3, 10, 11 are the heatmaps. The conditions cluster together in areas of overlap between mouse and human genes and also in areas where they least overlap, because they are organisms of different morphology but they are mammalian.
+
+## Answers to the questions about thresholded over-representation analysis
+
+1. Which method did you choose and why?
+
+    I chose the method of a thresholded list because it was in the lecture slides, is easy, and is suited for my data.
+    
+2. What annotation data did you use and why? What version of the annotation are you using?
+
+    I used g:Profiler g:GOSt H. sapiens annotation, GO:BP, Reactome, and WikiPathways even though my data has mouse as well as human samples, because we have used g:GOSt, GO:BP, Reactome, and WikiPathways for a previous journal assignment and only one organism's annotation is neccessary to process. g:Profiler version e108_eg55_p17_0254fbf, database updated on 28/12/2022. hsapiens (Human) - version: GRCh38.p13. GO:BP and REAC – annotations: BioMart, classes: releases/2022-12-04. WP – 20221210.
+
+3. How many genesets were returned with what thresholds?
+
+    As what was loaded into g:GOSt were genes from a thresholded list of p-value < 0.05, the results would be within those thresholds and also the default is 0.05. With the whole list and ignoring ambiguous query genes, GO:BP returns 1555, REAC returns 323, and WP returns 91 genesets.
+
+4. Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?
+
+    627 + 504 = 1131 sum of the upregulated and downregulated genesets returned in GO:BP is lower than the whole list's 1555 genesets returned, so then 424 genes don't change. The same can be said of REAC and WP. –log₁₀(padj) upregulated REAC values are not greater than 14. –log₁₀(padj) upregulated WP values are not greater than 12. In contrast, the combined and downregulated sets contain some values in this metric greater than or equal to 16.
+    
+## Interpretation
+
+1. Do the over-representation results support conclusions or mechanism discussed in the original paper?
+
+    Figure 9 suggests that the MUC1 gene has a p-value that is similar in both the simple and corrected models. However, the data given is not a before and after type experiment's to show the paper's claims, which is that mutant MUC1-fs is cleared from mice and patient kidneys by BRD4780 binding to TMED9.
+
+2. Can you find evidence, i.e. publications, to support some of the results that you see? How does this evidence support your results?
+
+    It is difficult to show that the results prove the claim. The genetic data might have been uploaded by the authors as evidence of having done an experiment, but they are not referenced in the paper. However, there have been other publications that reference the paper and support its claim, such as "Pharmacological Correction of Proteinopathies via Lysosomal Degradation" (@doi:10.1021/acs.biochem.9b00942). It references a paper that says MUC1-fs was found to be colocalized with TMED9.
+
+# References
